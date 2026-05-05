@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM Top-level menu: pick which cost dashboard to launch.
+REM Top-level menu: pick which cost calculator to launch.
 REM ============================================================
 setlocal
 pushd "%~dp0"
@@ -8,12 +8,12 @@ pushd "%~dp0"
 :menu
 cls
 echo.
-echo  Cost Dashboards
-echo  ===============
+echo  AI Coding Agents Cost Calculators
+echo  =================================
 echo.
-echo   [1] Claude Code Cost Dashboard   (qt_dashboard)
-echo   [2] Amp Code Cost Dashboard      (amp_dashboard)
-echo   [3] Droid (Factory.ai) Dashboard (droid_dashboard)
+echo   [1] Claude Code Calculator       (qt_dashboard)
+echo   [2] Amp Code Calculator          (amp_dashboard)
+echo   [3] Droid (Factory.ai) Calculator (droid_dashboard)
 echo   [Q] Quit
 echo.
 set "choice="

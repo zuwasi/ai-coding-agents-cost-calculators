@@ -1,11 +1,6 @@
-Claude Code Cost Dashboard
+AI Coding Agents Cost Calculators
 Copyright 2026 zuwasi
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-This product includes software derived from the
-`claude_code_cost_calculator` script (same author / repository).
+This repository includes a Claude Code calculator based on the original
+zuwasi/claude-code-cost-dashboard project and extends the concept with Amp Code
+and Droid (Factory.ai) calculators.

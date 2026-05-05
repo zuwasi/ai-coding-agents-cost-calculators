@@ -1,7 +1,7 @@
-# AI Coding Agent Cost Dashboards
+# AI Coding Agents Cost Calculators
 
-Customer-ready desktop tools for estimating and comparing real-world usage cost
-for three AI coding agents on a real code repository:
+Customer-ready desktop calculators for estimating and comparing real-world usage
+cost for three AI coding agents on a real code repository:
 
 | Option | Folder | Uses | Best for |
 | --- | --- | --- | --- |
@@ -9,28 +9,28 @@ for three AI coding agents on a real code repository:
 | Amp Code | `amp_dashboard/` | `amp -x --stream-json` | Estimating Amp usage by mode (`smart`, `deep`, `large`, `rush`). |
 | Droid / Factory.ai | `droid_dashboard/` | `droid exec -o json` | Estimating Factory.ai Droid usage by selected model. |
 
-The dashboards analyze a repository, propose representative engineering tasks,
+The calculators analyze a repository, propose representative engineering tasks,
 run selected task prompts through the chosen CLI, capture token usage/cost data,
 and roll the result up into per-developer, per-team, monthly, and yearly
 forecasts.
 
-> These tools are forecasting aids, not vendor quotes. They are intended to help
-> customers size budgets, compare usage patterns, and choose which agent or
-> workflow to test first.
+> These tools are forecasting aids, not vendor quotes. They help customers size
+> budgets, compare usage patterns, and choose which AI coding agent or workflow
+> to test first.
 
 ## What a customer can test
 
-1. **Claude Code dashboard** - if the customer already has Claude Code installed
-   and authenticated.
-2. **Amp Code dashboard** - if the customer wants to evaluate Amp and has the Amp
-   CLI installed/authenticated.
-3. **Droid dashboard** - if the customer wants to evaluate Factory.ai Droid and
+1. **Claude Code calculator** - if the customer already has Claude Code
+   installed and authenticated.
+2. **Amp Code calculator** - if the customer wants to evaluate Amp and has the
+   Amp CLI installed/authenticated.
+3. **Droid calculator** - if the customer wants to evaluate Factory.ai Droid and
    has Droid installed/authenticated.
 4. **Forecast script** - `claude_cost_forecast.py` is a non-GUI Claude Code
    command-line baseline for customers who prefer CSV output.
 
-Each dashboard is independent. A customer can test only the tool they care about
-without installing the other CLIs.
+Each calculator is independent. A customer can test only the tool they care
+about without installing the other CLIs.
 
 ## Quick start on Windows
 
@@ -47,18 +47,19 @@ without installing the other CLIs.
    run_dashboards.bat
    ```
 
-4. Choose the dashboard to test from the menu.
+4. Choose the calculator to test from the menu.
 
-The launcher checks for PyQt6 and installs it from the selected dashboard's
+The launcher checks for PyQt6 and installs it from the selected calculator's
 `requirements.txt` if needed. It also warns when the selected CLI is not on
-`PATH`, while still opening the UI so customers can see what the dashboard does.
+`PATH`, while still opening the UI so customers can see what the calculator
+does.
 
 ## Manual run
 
 From a terminal:
 
 ```powershell
-cd C:\path\to\ai-coding-agent-cost-dashboards
+cd C:\path\to\ai-coding-agents-cost-calculators
 
 # Claude Code GUI
 cd qt_dashboard
@@ -78,34 +79,20 @@ python droid_cost_dashboard.py
 
 ## How the workflow works
 
-```diagram
-╭────────────────────╮
-│ Customer repository │
-╰─────────┬──────────╯
-          │
-          ▼
-╭────────────────────╮
-│ Analyze repo        │
-│ propose 5-7 tasks   │
-╰─────────┬──────────╯
-          │
-          ▼
-╭────────────────────╮
-│ Customer selects    │
-│ tasks + frequency   │
-╰─────────┬──────────╯
-          │
-          ▼
-╭────────────────────╮
-│ Run selected CLI    │
-│ capture usage       │
-╰─────────┬──────────╯
-          │
-          ▼
-╭────────────────────╮
-│ Forecast per dev,   │
-│ team, month, year   │
-╰────────────────────╯
+```text
+Customer repository
+        |
+        v
+Analyze repo and propose 5-7 tasks
+        |
+        v
+Customer selects tasks and daily frequency
+        |
+        v
+Run selected CLI and capture usage
+        |
+        v
+Forecast per developer, team, month, and year
 ```
 
 The prompts ask the agent to produce realistic, shippable work with docs and
@@ -116,33 +103,36 @@ the cost of a short sketch.
 
 ```text
 .
-├── run_dashboards.bat              # Customer menu to launch any dashboard
-├── claude_cost_forecast.py         # Non-GUI Claude Code forecast script
-├── qt_dashboard/
-│   ├── claude_cost_dashboard.py
-│   ├── run_dashboard.bat
-│   ├── requirements.txt
-│   └── README.md
-├── amp_dashboard/
-│   ├── amp_cost_dashboard.py
-│   ├── run_dashboard.bat
-│   ├── requirements.txt
-│   └── README.md
-└── droid_dashboard/
-    ├── droid_cost_dashboard.py
-    ├── run_dashboard.bat
-    ├── requirements.txt
-    └── README.md
+|-- run_dashboards.bat              # Customer menu to launch any calculator
+|-- claude_cost_forecast.py         # Non-GUI Claude Code forecast script
+|-- requirements.txt                # Shared GUI dependency
+|-- LICENSE                         # MIT license
+|-- NOTICE                          # Attribution/source notes
+|-- qt_dashboard/
+|   |-- claude_cost_dashboard.py
+|   |-- run_dashboard.bat
+|   |-- requirements.txt
+|   `-- README.md
+|-- amp_dashboard/
+|   |-- amp_cost_dashboard.py
+|   |-- run_dashboard.bat
+|   |-- requirements.txt
+|   `-- README.md
+`-- droid_dashboard/
+    |-- droid_cost_dashboard.py
+    |-- run_dashboard.bat
+    |-- requirements.txt
+    `-- README.md
 ```
 
 ## Cost calculation notes
 
 - **Claude Code**: uses `total_cost_usd` reported by Claude Code's JSON output.
 - **Amp**: Amp currently reports usage tokens but not `total_cost_usd`, so the
-  dashboard estimates cost using `AMP_MODE_PRICING` in
+  calculator estimates cost using `AMP_MODE_PRICING` in
   `amp_dashboard/amp_cost_dashboard.py`.
 - **Droid**: Droid reports usage tokens but not `total_cost_usd`, so the
-  dashboard estimates cost using `DROID_MODEL_PRICING` in
+  calculator estimates cost using `DROID_MODEL_PRICING` in
   `droid_dashboard/droid_cost_dashboard.py`.
 
 Customers with contracted pricing should update the pricing tables and seat
@@ -150,7 +140,7 @@ price fields before treating forecasts as budget inputs.
 
 ## Safety and privacy
 
-- The dashboards run the selected CLI against a repository path chosen by the
+- The calculators run the selected CLI against a repository path chosen by the
   customer.
 - Prompts are written to be read-only: the agent is asked to return proposed
   implementation, documentation, and tests in its response rather than modifying
@@ -159,26 +149,22 @@ price fields before treating forecasts as budget inputs.
   during measurement. Use a clean working tree, a disposable copy, or a test
   repository for customer demos.
 - Repository content is sent only to the selected vendor CLI in the same way it
-  would be sent during a normal use of that agent.
+  would be sent during normal use of that agent.
 
-## Preparing/pushing upstream
+## License
 
-This folder is intended to be the upstream repository root. A clean push should
-include the dashboard source, READMEs, requirements, launcher scripts, license,
-and screenshot assets, but not generated Python caches or local reports.
+MIT. See [LICENSE](LICENSE).
 
-Suggested first push:
+## Original source
 
-```powershell
-git init
-git add .
-git commit -m "Customer-ready AI coding agent cost dashboards"
-git branch -M main
-git remote add origin <customer-facing-repo-url>
-git push -u origin main
-```
+The Claude Code calculator is based on
+[`zuwasi/claude-code-cost-dashboard`](https://github.com/zuwasi/claude-code-cost-dashboard)
+and has been extended here with Amp and Droid variants plus a shared customer
+launcher.
 
-Before sharing with customers, verify:
+## Maintainer verification
+
+Before sharing a new release with customers, verify:
 
 ```powershell
 py -3 -m py_compile claude_cost_forecast.py `
@@ -187,11 +173,4 @@ py -3 -m py_compile claude_cost_forecast.py `
   droid_dashboard\droid_cost_dashboard.py
 ```
 
-For visual verification, launch `run_dashboards.bat` and open each dashboard.
-
-## Original source
-
-The Claude Code dashboard is based on
-[`zuwasi/claude-code-cost-dashboard`](https://github.com/zuwasi/claude-code-cost-dashboard)
-and has been extended here with Amp and Droid variants plus a shared customer
-launcher.
+For visual verification, launch `run_dashboards.bat` and open each calculator.
