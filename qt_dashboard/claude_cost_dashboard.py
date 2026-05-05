@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 zuwasi
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: MIT
 """
 Claude Code Cost Dashboard (Qt6).
 
@@ -741,6 +731,15 @@ class Dashboard(QMainWindow):
         self.estimate_btn.clicked.connect(self._on_estimate)
         action.addWidget(self.estimate_btn)
 
+        self.export_test_btn = QPushButton("Export test")
+        self.export_test_btn.setEnabled(False)
+        self.export_test_btn.clicked.connect(self._on_export_test)
+        action.addWidget(self.export_test_btn)
+
+        self.import_test_btn = QPushButton("Import test")
+        self.import_test_btn.clicked.connect(self._on_import_test)
+        action.addWidget(self.import_test_btn)
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel)
@@ -845,6 +844,8 @@ class Dashboard(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         self.analyze_btn.setEnabled(not busy)
         self.estimate_btn.setEnabled(not busy and bool(self.task_rows))
+        self.export_test_btn.setEnabled(not busy and bool(self.task_rows))
+        self.import_test_btn.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy and self.estimate_worker is not None)
         self.progress.setVisible(busy)
         self.progress.setRange(0, 0 if busy else 1)
@@ -856,6 +857,125 @@ class Dashboard(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Choose a repository", start)
         if path:
             self.repo_edit.setText(path)
+
+    def _on_export_test(self) -> None:
+        if not self.task_rows:
+            QMessageBox.information(
+                self, "No test to export", "Analyze or import tasks before exporting."
+            )
+            return
+
+        default_path = str(Path.cwd() / "ai-agent-cost-test.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export test",
+            default_path,
+            "AI agent cost test (*.ai-agent-test.json);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+
+        tasks = []
+        for row in self.task_rows:
+            task = row.updated_task()
+            tasks.append(
+                {
+                    "name": task.name,
+                    "description": task.description,
+                    "rationale": task.rationale,
+                    "weight_per_day": task.weight_per_day,
+                    "selected": row.is_selected(),
+                }
+            )
+        payload = {
+            "schema": "ai-coding-agents-cost-calculators.test.v1",
+            "source_tool": TOOL_TITLE,
+            "repo_path": self.repo_edit.text().strip(),
+            "settings": {
+                "devs": self.devs_spin.value(),
+                "active_days_per_month": self.days_spin.value(),
+            },
+            "tasks": tasks,
+        }
+
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+
+        self._log(f"Exported reusable test to {path}")
+        self.statusBar().showMessage(f"Exported test: {path}")
+
+    def _on_import_test(self) -> None:
+        start = self.repo_edit.text().strip() or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import test",
+            start,
+            "AI agent cost test (*.ai-agent-test.json);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Import failed", str(e))
+            return
+
+        tasks_payload = payload.get("tasks")
+        if not isinstance(tasks_payload, list) or not tasks_payload:
+            QMessageBox.critical(self, "Import failed", "No tasks found in test file.")
+            return
+
+        repo_text = str(payload.get("repo_path") or "").strip()
+        if repo_text:
+            self.repo_edit.setText(repo_text)
+            self.repo_path = Path(repo_text).expanduser()
+        else:
+            self.repo_path = None
+
+        settings = payload.get("settings") or {}
+        if isinstance(settings, dict):
+            self.devs_spin.setValue(int(settings.get("devs") or self.devs_spin.value()))
+            self.days_spin.setValue(
+                int(settings.get("active_days_per_month") or self.days_spin.value())
+            )
+
+        self._clear_tasks()
+        self._clear_results()
+        self.analysis_cost = 0.0
+
+        for item in tasks_payload:
+            if not isinstance(item, dict):
+                continue
+            task = SuggestedTask(
+                name=str(item.get("name") or "task")[:60],
+                description=str(item.get("description") or "").strip(),
+                rationale=str(item.get("rationale") or "").strip(),
+                weight_per_day=float(item.get("weight_per_day") or 1.0),
+            )
+            row = TaskRow(task)
+            row.check.setChecked(bool(item.get("selected", True)))
+            self.task_rows.append(row)
+            self.tasks_inner_layout.insertWidget(
+                self.tasks_inner_layout.count() - 1, row
+            )
+
+        if not self.task_rows:
+            QMessageBox.critical(self, "Import failed", "No valid tasks found in test file.")
+            return
+
+        self.estimate_btn.setEnabled(True)
+        self.export_test_btn.setEnabled(True)
+        self._log(
+            f"Imported {len(self.task_rows)} reusable task(s) from {path}; "
+            "choose this dashboard's model and click Estimate."
+        )
+        self.statusBar().showMessage(
+            f"Imported {len(self.task_rows)} task(s). Click Estimate to run the same test."
+        )
 
     def _on_analyze(self) -> None:
         if not claude_on_path():
@@ -903,6 +1023,7 @@ class Dashboard(QMainWindow):
                 self.tasks_inner_layout.count() - 1, row
             )
         self.estimate_btn.setEnabled(True)
+        self.export_test_btn.setEnabled(True)
         self.statusBar().showMessage(
             f"{len(suggestions)} task(s) suggested. Tweak weights and click Estimate."
         )
@@ -919,8 +1040,11 @@ class Dashboard(QMainWindow):
                 self, "No tasks", "Select at least one task to estimate."
             )
             return
-        if self.repo_path is None:
+        repo = Path(self.repo_edit.text().strip()).expanduser()
+        if not repo.is_dir():
+            QMessageBox.warning(self, "Invalid repo", f"Not a directory:\n{repo}")
             return
+        self.repo_path = repo
 
         self._clear_results()
         self.results_table.setRowCount(len(chosen))
@@ -933,7 +1057,7 @@ class Dashboard(QMainWindow):
 
         self._chosen_for_run = chosen
         self.estimate_worker = EstimateWorker(
-            self.repo_path,
+            repo,
             chosen,
             self.model_combo.currentText(),
             timeout=900,

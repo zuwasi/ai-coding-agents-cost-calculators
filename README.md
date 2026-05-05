@@ -99,6 +99,21 @@ The prompts ask the agent to produce realistic, shippable work with docs and
 tests in its response. They are designed to estimate real task cost rather than
 the cost of a short sketch.
 
+## Reusing the same test across agents
+
+Every GUI includes **Export test** and **Import test** buttons.
+
+1. Start in any calculator and run **Analyze repo & suggest tasks**.
+2. Select the tasks you want, adjust the times/day values, and click
+   **Export test**.
+3. Open another calculator, click **Import test**, choose the exported JSON
+   file, select that calculator's model/mode, and click **Estimate**.
+
+The exported test file contains the repository path, selected task descriptions,
+task frequencies, team size, active days/month, and seat price when applicable.
+It does not contain vendor-specific results, so the same test can be performed
+independently in Claude Code, Amp Code, and Droid.
+
 ## Repository layout
 
 ```text

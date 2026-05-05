@@ -35,6 +35,10 @@ customers can also double-click `run_dashboards.bat` and choose option 1.
 
 The dashboard will warn in the status bar if `claude` is not on PATH.
 
+Use **Export test** after analysis to save the selected tasks and frequencies as
+a reusable JSON test file. Use **Import test** to load a test exported from the
+Amp or Droid calculator and run the same tasks with Claude Code.
+
 ## Notes
 
 - The estimate prompt explicitly asks Claude to write the change, write the

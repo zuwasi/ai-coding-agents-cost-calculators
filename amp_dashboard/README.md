@@ -56,6 +56,10 @@ python amp_cost_dashboard.py
 or double-click `run_dashboard.bat` on Windows. From the repository root,
 customers can also double-click `run_dashboards.bat` and choose option 2.
 
+Use **Export test** after analysis to save the selected tasks and frequencies as
+a reusable JSON test file. Use **Import test** to load a test exported from the
+Claude or Droid calculator and run the same tasks with Amp.
+
 ## Caveats
 
 - This is a forecasting / planning aid, not a quote.
