@@ -39,7 +39,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPalette
@@ -47,7 +47,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -82,6 +81,11 @@ ACCENT_GLOW = "#A78BFA"
 TOOL_TITLE = "Amp Code Cost Dashboard"
 TOOL_TAGLINE = "Forecast real spend on Sourcegraph's Amp CLI"
 TOOL_EMOJI = "⚡"
+HEADER_CREDIT_HTML = (
+    'Created by '
+    '<a href="https://github.com/zuwasi">Daniel Liezrowice</a> from '
+    '<a href="https://www.esl.co.il/">Engineering Software Lab Israel</a>'
+)
 
 
 def _apply_theme(app: QApplication) -> None:
@@ -278,8 +282,17 @@ def _build_header(parent: QWidget) -> QFrame:
     tagline = QLabel(TOOL_TAGLINE)
     tagline.setObjectName("HeroTagline")
     tagline.setStyleSheet("background: transparent;")
+    credit = QLabel(HEADER_CREDIT_HTML)
+    credit.setOpenExternalLinks(True)
+    credit.setTextFormat(Qt.TextFormat.RichText)
+    credit.setStyleSheet(
+        "background: transparent; color: rgba(255,255,255,220); "
+        "font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace; "
+        "font-size: 9pt; font-weight: 600;"
+    )
     text_lay.addWidget(title)
     text_lay.addWidget(tagline)
+    text_lay.addWidget(credit)
     lay.addLayout(text_lay, stretch=1)
     badge = QLabel("v2 • Qt6")
     badge.setStyleSheet(
@@ -292,30 +305,27 @@ def _build_header(parent: QWidget) -> QFrame:
 
 
 # ---------------------------------------------------------------------------
-# Pricing table (USD per 1,000,000 tokens) — best-effort estimates of the
-# underlying frontier model that each Amp mode dispatches to. Adjust freely.
+# Pricing table (USD credits per 1,000,000 tokens) — best-effort estimates of
+# the underlying model price for each Amp mode. Amp credits are USD-denominated:
+# individual/team workspaces have zero Amp markup, and Enterprise costs 50%
+# more. See https://ampcode.com/manual#pricing.
 # Fields: input, output, cache_read, cache_creation
 # ---------------------------------------------------------------------------
 
 AMP_MODE_PRICING: dict[str, dict[str, float]] = {
-    # Smart mode -> Claude Sonnet 4.x class
-    "smart": {"input": 3.00, "output": 15.00,
-              "cache_read": 0.30, "cache_creation": 3.75},
+    # Smart mode currently uses Claude Opus 4.7 (Amp manual, 2026-05-07).
+    "smart": {"input": 15.00, "output": 75.00,
+              "cache_read": 1.50, "cache_creation": 18.75},
     # Deep mode -> GPT-5 high-reasoning class
     "deep":  {"input": 1.25, "output": 10.00,
               "cache_read": 0.125, "cache_creation": 1.5625},
-    # Large mode -> Claude Opus 4.x class
+    # Large mode is hidden/experimental and currently Opus-class with 1M context.
     "large": {"input": 15.00, "output": 75.00,
               "cache_read": 1.50, "cache_creation": 18.75},
     # Rush mode -> Haiku / fast class
     "rush":  {"input": 0.80, "output": 4.00,
               "cache_read": 0.08, "cache_creation": 1.00},
 }
-
-# Amp Team plan list price (USD / seat / month). Used to compute the
-# "above-seats overage" line in the forecast. Editable in the UI.
-DEFAULT_AMP_SEAT_PRICE_USD_PER_MONTH = 40.0
-
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -388,6 +398,91 @@ def _resolve_amp_invocation() -> Optional[List[str]]:
     return [exe]
 
 
+def _cli_creation_flags() -> int:
+    """Run heavy agent CLIs at lower priority on Windows."""
+    if os.name != "nt":
+        return 0
+    return (
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Terminate a stuck agent CLI and its children."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+    else:
+        proc.kill()
+
+
+def _communicate_after_kill(proc: subprocess.Popen) -> tuple[str, str]:
+    """Collect whatever output is available after terminating a process."""
+    try:
+        stdout, stderr = proc.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=3)
+    return stdout or "", stderr or ""
+
+
+def _run_cli(
+    cmd: List[str],
+    repo_path: Path,
+    timeout: int,
+    *,
+    input_text: Optional[str] = None,
+    use_shell: bool = False,
+    cancel_requested: Optional[Callable[[], bool]] = None,
+) -> tuple[int, str, str, float, Optional[str]]:
+    """Run an agent CLI with timeout/cancel checks and low process priority."""
+    start = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo_path),
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=use_shell,
+        creationflags=_cli_creation_flags(),
+    )
+    first_communicate = True
+    while True:
+        if cancel_requested and cancel_requested():
+            _kill_process_tree(proc)
+            stdout, stderr = _communicate_after_kill(proc)
+            return proc.returncode or -1, stdout or "", stderr or "", time.time() - start, "cancelled"
+        elapsed = time.time() - start
+        if elapsed >= timeout:
+            _kill_process_tree(proc)
+            stdout, stderr = _communicate_after_kill(proc)
+            return proc.returncode or -1, stdout or "", stderr or "", time.time() - start, f"timeout after {timeout}s"
+        try:
+            wait_for = min(0.5, max(0.1, timeout - elapsed))
+            if first_communicate:
+                stdout, stderr = proc.communicate(input=input_text, timeout=wait_for)
+                first_communicate = False
+            else:
+                stdout, stderr = proc.communicate(timeout=wait_for)
+            return proc.returncode, stdout or "", stderr or "", time.time() - start, None
+        except subprocess.TimeoutExpired:
+            first_communicate = False
+
+
 def _price_tokens(usage: dict, mode: str) -> float:
     """Compute estimated USD cost for a single result's token usage."""
     rates = AMP_MODE_PRICING.get(mode, AMP_MODE_PRICING["smart"])
@@ -404,6 +499,7 @@ def run_amp(
     prompt: str,
     mode: str,
     timeout: int,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> tuple[Optional[dict], Optional[str], float]:
     """
     Run `amp -x --stream-json` once. Returns (parsed_dict, error, duration_sec).
@@ -436,26 +532,19 @@ def run_amp(
         and invocation[0].lower().endswith((".cmd", ".bat"))
     )
 
-    start = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=use_shell,
+        returncode, stdout, stderr, duration, run_error = _run_cli(
+            cmd, repo_path, timeout, input_text=prompt, use_shell=use_shell,
+            cancel_requested=cancel_requested,
         )
-    except subprocess.TimeoutExpired:
-        return None, f"timeout after {timeout}s", time.time() - start
     except FileNotFoundError:
         return None, "`amp` not found on PATH — install Amp CLI first", 0.0
 
-    duration = time.time() - start
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip().replace("\n", " ")[:300]
-        return None, f"exit {proc.returncode}: {stderr}", duration
+    if run_error:
+        return None, run_error, duration
+    if returncode != 0:
+        stderr = (stderr or "").strip().replace("\n", " ")[:300]
+        return None, f"exit {returncode}: {stderr}", duration
 
     # Parse JSONL: sum usage across all assistant events; pick result event
     # for final text + num_turns + duration.
@@ -468,7 +557,7 @@ def run_amp(
     final_text = ""
     num_turns = 0
     saw_any = False
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -595,75 +684,83 @@ class SuggestWorker(QThread):
         self.repo = repo
         self.mode = mode
         self.timeout = timeout
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
 
     def run(self) -> None:
-        self.log.emit(f"Asking Amp ({self.mode}) to analyze {self.repo} ...")
-        data, err, dur = run_amp(
-            self.repo, SUGGEST_PROMPT_TEMPLATE, self.mode, self.timeout
-        )
-        if err:
-            self.failed.emit(err)
-            return
-
-        text = data.get("result") or ""
-        if isinstance(text, list):
-            text = "".join(
-                c.get("text", "") for c in text if isinstance(c, dict)
-            )
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:]
-        lb, rb = text.find("["), text.rfind("]")
-        if lb == -1 or rb == -1 or rb < lb:
-            self.failed.emit(
-                "Could not locate a JSON array in Amp's reply. "
-                "Raw reply:\n" + text[:500]
-            )
-            return
         try:
-            arr = json.loads(text[lb : rb + 1])
-        except json.JSONDecodeError as e:
-            self.failed.emit(f"JSON parse error: {e}\nRaw:\n{text[:500]}")
-            return
+            self.log.emit(f"Asking Amp ({self.mode}) to analyze {self.repo} ...")
+            data, err, dur = run_amp(
+                self.repo, SUGGEST_PROMPT_TEMPLATE, self.mode, self.timeout,
+                cancel_requested=lambda: self._cancel,
+            )
+            if err:
+                self.failed.emit(err)
+                return
 
-        suggestions: List[SuggestedTask] = []
-        for item in arr:
-            if not isinstance(item, dict):
-                continue
-            try:
-                suggestions.append(
-                    SuggestedTask(
-                        name=str(item.get("name", "task"))[:60],
-                        description=str(item.get("description", "")).strip(),
-                        rationale=str(item.get("rationale", "")).strip(),
-                        weight_per_day=float(item.get("weight_per_day", 1) or 1),
-                    )
+            text = data.get("result") or ""
+            if isinstance(text, list):
+                text = "".join(
+                    c.get("text", "") for c in text if isinstance(c, dict)
                 )
-            except (TypeError, ValueError):
-                continue
+            text = text.strip()
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:]
+            lb, rb = text.find("["), text.rfind("]")
+            if lb == -1 or rb == -1 or rb < lb:
+                self.failed.emit(
+                    "Could not locate a JSON array in Amp's reply. "
+                    "Raw reply:\n" + text[:500]
+                )
+                return
+            try:
+                arr = json.loads(text[lb : rb + 1])
+            except json.JSONDecodeError as e:
+                self.failed.emit(f"JSON parse error: {e}\nRaw:\n{text[:500]}")
+                return
 
-        if not suggestions:
-            self.failed.emit("Amp returned no usable task suggestions.")
-            return
+            suggestions: List[SuggestedTask] = []
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    suggestions.append(
+                        SuggestedTask(
+                            name=str(item.get("name", "task"))[:60],
+                            description=str(item.get("description", "")).strip(),
+                            rationale=str(item.get("rationale", "")).strip(),
+                            weight_per_day=float(item.get("weight_per_day", 1) or 1),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
 
-        analyze_cost = extract_cost(data)
-        analyze_cost.name = "(repo analysis)"
-        analyze_cost.duration_sec = dur
-        self.log.emit(
-            f"Got {len(suggestions)} suggestions "
-            f"(analysis est. ${analyze_cost.cost_usd:.4f}, "
-            f"{analyze_cost.total_tokens:,} tok, {dur:.1f}s)."
-        )
-        self.finished_ok.emit(
-            suggestions,
-            {
-                "cost_usd": analyze_cost.cost_usd,
-                "duration_sec": dur,
-                "total_tokens": analyze_cost.total_tokens,
-            },
-        )
+            if not suggestions:
+                self.failed.emit("Amp returned no usable task suggestions.")
+                return
+
+            analyze_cost = extract_cost(data)
+            analyze_cost.name = "(repo analysis)"
+            analyze_cost.duration_sec = dur
+            self.log.emit(
+                f"Got {len(suggestions)} suggestions "
+                f"(analysis est. ${analyze_cost.cost_usd:.4f}, "
+                f"{analyze_cost.total_tokens:,} tok, {dur:.1f}s)."
+            )
+            self.finished_ok.emit(
+                suggestions,
+                {
+                    "cost_usd": analyze_cost.cost_usd,
+                    "duration_sec": dur,
+                    "total_tokens": analyze_cost.total_tokens,
+                },
+            )
+        except Exception as e:
+            self.failed.emit(f"Unexpected analysis error: {type(e).__name__}: {e}")
 
 
 class EstimateWorker(QThread):
@@ -689,21 +786,32 @@ class EstimateWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:
-        for i, t in enumerate(self.tasks):
-            if self._cancel:
-                self.log.emit("Cancelled.")
-                break
-            self.log.emit(f"[{i+1}/{len(self.tasks)}] estimating: {t.name}")
-            prompt = ESTIMATE_PROMPT_TEMPLATE.format(description=t.description)
-            data, err, dur = run_amp(self.repo, prompt, self.mode, self.timeout)
-            if err:
-                tc = TaskCost(name=t.name, error=err, duration_sec=dur)
-            else:
-                tc = extract_cost(data)
-                tc.name = t.name
-                tc.duration_sec = dur
-            self.one_done.emit(i, tc)
-        self.all_done.emit()
+        try:
+            for i, t in enumerate(self.tasks):
+                if self._cancel:
+                    self.log.emit("Cancelled.")
+                    break
+                self.log.emit(f"[{i+1}/{len(self.tasks)}] estimating: {t.name}")
+                try:
+                    prompt = ESTIMATE_PROMPT_TEMPLATE.format(description=t.description)
+                    data, err, dur = run_amp(
+                        self.repo, prompt, self.mode, self.timeout,
+                        cancel_requested=lambda: self._cancel,
+                    )
+                    if err:
+                        tc = TaskCost(name=t.name, error=err, duration_sec=dur)
+                    else:
+                        tc = extract_cost(data)
+                        tc.name = t.name
+                        tc.duration_sec = dur
+                except Exception as e:
+                    tc = TaskCost(
+                        name=t.name,
+                        error=f"unexpected error: {type(e).__name__}: {e}",
+                    )
+                self.one_done.emit(i, tc)
+        finally:
+            self.all_done.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +901,7 @@ class Dashboard(QMainWindow):
         top_layout.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["smart", "deep", "large", "rush"])
+        self.mode_combo.setCurrentText("smart")
         top_layout.addWidget(self.mode_combo)
 
         top_layout.addSpacing(12)
@@ -808,12 +917,9 @@ class Dashboard(QMainWindow):
         self.days_spin.setValue(20)
         top_layout.addWidget(self.days_spin)
 
-        top_layout.addWidget(QLabel("Seat $/mo:"))
-        self.seat_spin = QDoubleSpinBox()
-        self.seat_spin.setRange(0.0, 1000.0)
-        self.seat_spin.setDecimals(2)
-        self.seat_spin.setValue(DEFAULT_AMP_SEAT_PRICE_USD_PER_MONTH)
-        top_layout.addWidget(self.seat_spin)
+        credits_note = QLabel("Billing: Amp credits")
+        credits_note.setStyleSheet("color: #A78BFA; font-weight: 700;")
+        top_layout.addWidget(credits_note)
 
         outer.addWidget(top)
 
@@ -827,7 +933,7 @@ class Dashboard(QMainWindow):
         self.estimate_btn.clicked.connect(self._on_estimate)
         action.addWidget(self.estimate_btn)
 
-        self.export_test_btn = QPushButton("Export test")
+        self.export_test_btn = QPushButton("Save / Export test")
         self.export_test_btn.setEnabled(False)
         self.export_test_btn.clicked.connect(self._on_export_test)
         action.addWidget(self.export_test_btn)
@@ -867,7 +973,7 @@ class Dashboard(QMainWindow):
         rb = QVBoxLayout(results_box)
         self.results_table = QTableWidget(0, 5)
         self.results_table.setHorizontalHeaderLabels(
-            ["Task", "Est. cost (USD)", "Tokens", "Turns", "Time (s)"]
+            ["Task", "Est. Amp credits", "Tokens", "Turns", "Time (s)"]
         )
         self.results_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
@@ -936,7 +1042,9 @@ class Dashboard(QMainWindow):
         self.estimate_btn.setEnabled(not busy and bool(self.task_rows))
         self.export_test_btn.setEnabled(not busy and bool(self.task_rows))
         self.import_test_btn.setEnabled(not busy)
-        self.cancel_btn.setEnabled(busy and self.estimate_worker is not None)
+        self.cancel_btn.setEnabled(
+            busy and (self.suggest_worker is not None or self.estimate_worker is not None)
+        )
         self.progress.setVisible(busy)
         self.progress.setRange(0, 0 if busy else 1)
 
@@ -953,15 +1061,18 @@ class Dashboard(QMainWindow):
             )
             return
 
-        default_path = str(Path.cwd() / "ai-agent-cost-test.json")
+        default_path = str(Path.home() / "Documents" / "ai-agent-cost-test.ai-agent-test.json")
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export test",
+            "Save / Export test",
             default_path,
             "AI agent cost test (*.ai-agent-test.json);;JSON files (*.json);;All files (*)",
         )
         if not path:
             return
+        save_path = Path(path)
+        if save_path.suffix.lower() != ".json":
+            save_path = save_path.with_suffix(".ai-agent-test.json")
 
         tasks = []
         for row in self.task_rows:
@@ -980,21 +1091,27 @@ class Dashboard(QMainWindow):
             "source_tool": TOOL_TITLE,
             "repo_path": self.repo_edit.text().strip(),
             "settings": {
+                "mode": self.mode_combo.currentText(),
                 "devs": self.devs_spin.value(),
                 "active_days_per_month": self.days_spin.value(),
-                "seat_usd_per_month": self.seat_spin.value(),
+            },
+            "analysis": {
+                "cost_usd": self.analysis_cost,
             },
             "tasks": tasks,
+            "results": [r.__dict__ for r in self.results],
         }
 
         try:
-            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError as e:
             QMessageBox.critical(self, "Export failed", str(e))
             return
 
-        self._log(f"Exported reusable test to {path}")
-        self.statusBar().showMessage(f"Exported test: {path}")
+        self._log(f"Saved reusable test to {save_path}")
+        self.statusBar().showMessage(f"Saved test: {save_path}")
+        QMessageBox.information(self, "Test saved", f"Saved test JSON to:\n{save_path}")
 
     def _on_import_test(self) -> None:
         start = self.repo_edit.text().strip() or os.path.expanduser("~")
@@ -1027,17 +1144,19 @@ class Dashboard(QMainWindow):
 
         settings = payload.get("settings") or {}
         if isinstance(settings, dict):
+            mode = settings.get("mode")
+            if mode:
+                self.mode_combo.setCurrentText(str(mode))
             self.devs_spin.setValue(int(settings.get("devs") or self.devs_spin.value()))
             self.days_spin.setValue(
                 int(settings.get("active_days_per_month") or self.days_spin.value())
             )
-            self.seat_spin.setValue(
-                float(settings.get("seat_usd_per_month") or self.seat_spin.value())
-            )
 
+        self.log_view.clear()
         self._clear_tasks()
         self._clear_results()
-        self.analysis_cost = 0.0
+        analysis = payload.get("analysis") or {}
+        self.analysis_cost = float(analysis.get("cost_usd") or 0.0) if isinstance(analysis, dict) else 0.0
 
         for item in tasks_payload:
             if not isinstance(item, dict):
@@ -1059,11 +1178,37 @@ class Dashboard(QMainWindow):
             QMessageBox.critical(self, "Import failed", "No valid tasks found in test file.")
             return
 
+        self._chosen_for_run = [
+            row.updated_task() for row in self.task_rows if row.is_selected()
+        ]
+        results_payload = payload.get("results")
+        if isinstance(results_payload, list) and results_payload:
+            self.results_table.setRowCount(len(results_payload))
+            for i, item in enumerate(results_payload):
+                if not isinstance(item, dict):
+                    continue
+                tc = TaskCost(
+                    name=str(item.get("name") or "task"),
+                    cost_usd=float(item.get("cost_usd") or 0.0),
+                    duration_sec=float(item.get("duration_sec") or 0.0),
+                    input_tokens=int(item.get("input_tokens") or 0),
+                    output_tokens=int(item.get("output_tokens") or 0),
+                    cache_read_tokens=int(item.get("cache_read_tokens") or 0),
+                    cache_creation_tokens=int(item.get("cache_creation_tokens") or 0),
+                    total_tokens=int(item.get("total_tokens") or 0),
+                    num_turns=int(item.get("num_turns") or 0),
+                    error=item.get("error"),
+                )
+                self.results_table.setItem(i, 0, QTableWidgetItem(tc.name))
+                self._on_one_done(i, tc)
+            self._render_summary()
+            self._log(f"Loaded {len(self.results)} saved result(s) for review.")
+
         self.estimate_btn.setEnabled(True)
         self.export_test_btn.setEnabled(True)
         self._log(
             f"Imported {len(self.task_rows)} reusable task(s) from {path}; "
-            "choose this dashboard's mode and click Estimate."
+            "choose this dashboard's mode and click Estimate to run it again."
         )
         self.statusBar().showMessage(
             f"Imported {len(self.task_rows)} task(s). Click Estimate to run the same test."
@@ -1088,12 +1233,13 @@ class Dashboard(QMainWindow):
         self._clear_tasks()
         self._clear_results()
         self.analysis_cost = 0.0
+        self.log_view.clear()
 
         self._set_busy(True)
         self._log(f"--- Analyzing {repo} (mode={self.mode_combo.currentText()}) ---")
 
         self.suggest_worker = SuggestWorker(
-            repo, self.mode_combo.currentText(), timeout=600
+            repo, self.mode_combo.currentText(), timeout=300
         )
         self.suggest_worker.log.connect(self._log)
         self.suggest_worker.finished_ok.connect(self._on_suggest_ok)
@@ -1109,14 +1255,19 @@ class Dashboard(QMainWindow):
         )
         for s in suggestions:
             row = TaskRow(s)
+            row.check.setChecked(len(self.task_rows) == 0)
             self.task_rows.append(row)
             self.tasks_inner_layout.insertWidget(
                 self.tasks_inner_layout.count() - 1, row
             )
         self.estimate_btn.setEnabled(True)
         self.export_test_btn.setEnabled(True)
+        self._log(
+            "Safety mode: selected only the first suggested task by default. "
+            "Select more tasks manually if this machine can handle longer runs."
+        )
         self.statusBar().showMessage(
-            f"{len(suggestions)} task(s) suggested. Tweak weights and click Estimate."
+            f"{len(suggestions)} task(s) suggested. First task selected for safer estimation."
         )
 
     def _on_suggest_fail(self, msg: str) -> None:
@@ -1160,20 +1311,24 @@ class Dashboard(QMainWindow):
         self.estimate_worker.start()
 
     def _on_cancel(self) -> None:
+        if self.suggest_worker:
+            self.suggest_worker.cancel()
         if self.estimate_worker:
             self.estimate_worker.cancel()
-            self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self._log("Cancel requested; stopping the running CLI process...")
 
     def _on_one_done(self, idx: int, tc: TaskCost) -> None:
         self.results.append(tc)
         if tc.error:
-            self.results_table.setItem(idx, 1, QTableWidgetItem("ERROR"))
+            status = "Timed out" if "timeout" in tc.error else "Cancelled" if "cancelled" in tc.error else "No cost"
+            self.results_table.setItem(idx, 1, QTableWidgetItem(status))
             self.results_table.setItem(idx, 2, QTableWidgetItem("-"))
             self.results_table.setItem(idx, 3, QTableWidgetItem("-"))
             self.results_table.setItem(
                 idx, 4, QTableWidgetItem(f"{tc.duration_sec:.1f}")
             )
-            self._log(f"  {tc.name}: ERROR — {tc.error}")
+            self._log(f"  {tc.name}: {status} — {tc.error}")
         else:
             self.results_table.setItem(
                 idx, 1, QTableWidgetItem(f"${tc.cost_usd:.4f}")
@@ -1188,42 +1343,64 @@ class Dashboard(QMainWindow):
             self._log(
                 f"  {tc.name}: ~${tc.cost_usd:.4f}  "
                 f"{tc.total_tokens:,} tok  "
-                f"{tc.num_turns} turns  {tc.duration_sec:.1f}s"
+                f"{tc.num_turns} turns  {tc.duration_sec:.1f}s  "
+                f"(in {tc.input_tokens:,}, out {tc.output_tokens:,}, "
+                f"cache read {tc.cache_read_tokens:,}, "
+                f"cache write {tc.cache_creation_tokens:,})"
             )
 
     def _on_all_done(self) -> None:
         self._set_busy(False)
         self.cancel_btn.setEnabled(False)
         self._render_summary()
+        if any(r.error and ("timeout" in r.error or "cancelled" in r.error)
+               for r in self.results):
+            self.estimate_btn.setEnabled(False)
+            self._log(
+                "Estimate disabled after timeout/cancel to prevent accidental "
+                "re-runs. Re-analyze or import a test to run again."
+            )
         self._log("--- Done ---")
 
     def _render_summary(self) -> None:
         valid = [r for r in self.results if r.error is None and r.cost_usd > 0]
+        failed = [r for r in self.results if r.error]
+        attempted = len(self.results)
         if not valid:
-            self.summary_label.setText(
-                "<b>No valid results.</b> Check the log for errors."
-            )
+            html = f"""
+            <table cellpadding="4">
+            <tr><td><b>Repo analysis completed:</b></td>
+                <td align="right">~${self.analysis_cost:,.4f}</td></tr>
+            <tr><td><b>Task estimates completed:</b></td>
+                <td align="right">0 / {attempted}</td></tr>
+            <tr><td><b>Measured Amp credits so far:</b></td>
+                <td align="right"><b>~${self.analysis_cost:,.4f}</b></td></tr>
+            </table>
+            <p style="color:#FBBF24;"><b>Task cost unavailable.</b> The selected
+            task did not finish before the safety timeout, so the dashboard did
+            not receive complete token usage for that task.</p>
+            <p style="color:#94A3B8;">For large repositories, use this analysis
+            credits as the confirmed estimate and run a smaller/lighter task if you
+            need a completed per-task cost.</p>
+            """
+            self.summary_label.setText(html)
             return
 
         weight_by_name = {
             t.name: t.weight_per_day for t in getattr(self, "_chosen_for_run", [])
         }
         per_task_total = sum(r.cost_usd for r in valid)
+        measured_total = self.analysis_cost + per_task_total
         per_dev_per_day = sum(
             r.cost_usd * weight_by_name.get(r.name, 1.0) for r in valid
         )
         devs = self.devs_spin.value()
         days = self.days_spin.value()
-        seat = self.seat_spin.value()
         mode = self.mode_combo.currentText()
 
         per_dev_per_month = per_dev_per_day * days
         team_per_month = per_dev_per_month * devs
         team_per_year = team_per_month * 12
-
-        seats_yr = seat * devs * 12
-        overage = max(0.0, team_per_year - seats_yr)
-        expected = seats_yr + overage
 
         html = f"""
         <table cellpadding="4">
@@ -1233,29 +1410,32 @@ class Dashboard(QMainWindow):
             <td align="right">~${self.analysis_cost:,.4f}</td></tr>
         <tr><td><b>Sum of one run of selected tasks:</b></td>
             <td align="right">~${per_task_total:,.4f}</td></tr>
+        <tr><td><b>Measured Amp credits this run:</b></td>
+            <td align="right">~${measured_total:,.4f}</td></tr>
+        <tr><td><b>Task estimates completed:</b></td>
+            <td align="right">{len(valid)} / {attempted}</td></tr>
         <tr><td><b>Per dev / active day (weighted):</b></td>
             <td align="right">~${per_dev_per_day:,.2f}</td></tr>
         <tr><td><b>Per dev / month ({days} days):</b></td>
             <td align="right">~${per_dev_per_month:,.2f}</td></tr>
-        <tr><td><b>Team ({devs} devs) / month:</b></td>
+        <tr><td><b>Team ({devs} devs) credits / month:</b></td>
             <td align="right">~${team_per_month:,.2f}</td></tr>
-        <tr><td><b>Team ({devs} devs) / year:</b></td>
+        <tr><td><b>Team ({devs} devs) credits / year:</b></td>
             <td align="right">~${team_per_year:,.2f}</td></tr>
         <tr><td colspan="2"><hr></td></tr>
-        <tr><td>Amp seats list price (${seat:.0f}/seat/mo):</td>
-            <td align="right">${seats_yr:,.2f}/yr</td></tr>
-        <tr><td>Estimated overage above seats:</td>
-            <td align="right">${overage:,.2f}/yr</td></tr>
-        <tr><td><b>Expected total cost:</b></td>
-            <td align="right"><b>${expected:,.2f}/yr</b></td></tr>
+        <tr><td><b>Estimated Amp credits to buy:</b></td>
+            <td align="right"><b>~${team_per_year:,.2f}/yr</b></td></tr>
         </table>
-        <p style="color:#94A3B8;">Amp does not emit
+        <p style="color:#94A3B8;">Amp billing is credits-based. For individual
+        and team workspaces, Amp passes through provider API usage with zero
+        markup; $1 of provider usage deducts $1 from the Amp credits balance.
+        Enterprise usage is 50% more expensive.</p>
+        <p style="color:#94A3B8;">Amp CLI output used here does not emit
         <code style="color:{ACCENT_1};">total_cost_usd</code> directly. Costs
         above are <i>estimates</i> derived from reported token usage × the
         model price table for the selected mode (see
-        <code style="color:{ACCENT_1};">AMP_MODE_PRICING</code> in this file).
-        Real bills can run 1.5–3× higher due to iteration, long autonomous
-        sessions, and MCP context bloat.</p>
+        <code style="color:{ACCENT_1};">AMP_MODE_PRICING</code> in this file).</p>
+        {('<p style="color:#FBBF24;">Some task estimates did not complete and are excluded from the forecast.</p>' if failed else '')}
         """.replace("{ACCENT_1}", ACCENT_1)
         self.summary_label.setText(html)
 

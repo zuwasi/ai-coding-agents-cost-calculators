@@ -132,6 +132,8 @@ def run_task(repo_path: Path, task: dict, model: str, timeout: int) -> TaskResul
             cwd=str(repo_path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
